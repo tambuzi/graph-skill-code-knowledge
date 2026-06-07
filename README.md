@@ -28,6 +28,7 @@ interface, and structural-only (no-LLM, fully local) extraction.
 - [Language coverage](#language-coverage)
 - [How it works](#how-it-works)
 - [Performance](#performance)
+- [Token efficiency](#token-efficiency)
 - [Troubleshooting](#troubleshooting)
 - [Limits](#limits)
 
@@ -360,6 +361,86 @@ Measured on a ~2,600-file PHP/JS/TS codebase (≈14k symbols, ≈80k edges):
 
 The initial build is write-bound (inserting tens of thousands of nodes/edges);
 incremental updates and queries are fast.
+
+---
+
+## Token efficiency
+
+Measured on a real refactoring session against a ~2,600-file PHP/JS/TS codebase
+(KnoGraph) — three consecutive architecture-audit iterations, each finding and
+fixing Hexagonal Architecture / DDD violations.
+
+Each iteration was run using graphskill MCP tools exclusively; token costs for
+the equivalent grep + `Read`-whole-file approach are reconstructed from what
+those operations would have consumed.
+
+### Iteration 1 — Application layer audit
+
+| Method | Tokens consumed | Ratio |
+|--------|-----------------|-------|
+| graphskill MCP | ~4,019 | 1× |
+| grep + Read | ~52,660 | 13.1× |
+| **Savings** | | **92.4 %** |
+
+MCP calls used: `search_symbols`, `imports`, `read_symbol_body` (targeted).  
+Grep equivalent: `grep -rn "use KnoGraph\\Infrastructure"` across all layers +
+full-file `Read` for each of the ~25 flagged files.
+
+### Iteration 2 — Systemic `CommandType` + filesystem violations
+
+| Method | Tokens consumed | Ratio |
+|--------|-----------------|-------|
+| graphskill MCP | ~11,650 | 1× |
+| grep + Read | ~42,500 | 3.6× |
+| **Savings** | | **72.6 %** |
+
+Savings were lower here because:
+- One `CommandType` fix required reading the full 274-line file regardless of method.
+- The MCP graph had not yet been refreshed after iteration 1 edits, so three
+  symbol lookups fell back to grep.
+- Filesystem-call violations (`tempnam`, `file_get_contents`) are faster to
+  spot with grep patterns than with symbol-based search.
+
+### Iteration 3 — Systemic `handle()` → `__invoke()` CQS fix
+
+| Method | Tokens consumed | Ratio |
+|--------|-----------------|-------|
+| graphskill MCP | ~3,300 | 1× |
+| grep + Read | ~15,700 | 4.8× |
+| **Savings** | | **79.0 %** |
+
+MCP calls used: `search_symbols("handle", kind=method)` to identify all 79
+handler methods in one query, `read_symbol_body` on two outlier handlers
+(`ClusterToTopicCommandHandler`, `ListUsersQueryHandler`) to see the no-param
+design flaw, and `search_symbols` on Research handlers to confirm they were
+already compliant.
+
+Grep equivalent: grep for `public function handle(` across all files + reading
+`CommandHandlerInterface`, `QueryHandlerInterface`, `CommandBus`, a sample of
+10+ handler files to understand patterns, and spot-checking the Research module.
+
+Savings were moderate rather than dramatic because iteration 3 was a single
+well-defined pattern (`handle` → `__invoke`); grep is reasonably efficient on a
+single known string. MCP's advantage remained in targeted body lookups and
+avoiding reading files that were already correct.
+
+### Cumulative (all three iterations)
+
+| | Tokens |
+|--|--------|
+| graphskill MCP | ~18,969 |
+| grep + Read | ~110,860 |
+| **Net savings** | **~91,891 tokens (82.9 %)** |
+
+### Why MCP is cheaper
+
+- `imports(path)` returns only the import list — not the file body.
+- `read_symbol_body(ref)` returns one class or function — not the whole file.
+- `search_symbols(query)` returns structured name/location/signature rows —
+  no grep output noise or false positives to filter.
+
+The efficiency gap is largest when violations are **sparse** (few bad files in a
+large codebase): grep must scan everything; the graph answers in one hop.
 
 ---
 
