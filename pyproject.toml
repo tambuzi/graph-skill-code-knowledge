@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graphskill"
+version = "0.1.0"
+description = "Code knowledge graph skill for Claude Code: index a repo into an embedded graph, query it via MCP instead of grepping files."
+requires-python = ">=3.10"
+dependencies = [
+    "tree-sitter>=0.25",
+    "tree-sitter-language-pack>=1.8",
+    "kuzu>=0.11",
+    "mcp[cli]>=1.2",
+    "click>=8.1",
+]
+
+[project.scripts]
+graphskill = "graphskill.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["graphskill*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

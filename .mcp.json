@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "graphskill": {
+      "command": "/Users/alejandrofernandez/Desktop/Projects/graphSkill/.venv/bin/python",
+      "args": [
+        "-m",
+        "graphskill",
+        "serve",
+        "/Users/alejandrofernandez/Desktop/Projects/graphSkill"
+      ],
+      "env": {}
+    }
+  }
+}

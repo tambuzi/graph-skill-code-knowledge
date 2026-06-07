@@ -1,0 +1,10 @@
+.venv/
+.git/
+.graphskill/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.pyc
+.DS_Store
