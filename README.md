@@ -207,8 +207,9 @@ MCP server — approve it. The graphskill tools then appear natively, and you ca
 ask things like *"who calls `dispatch`?"* and get an answer straight from the
 graph.
 
-> After editing files during a session, re-run `graphskill index <project>` so
-> the graph reflects your changes before you rely on it again.
+The MCP server watches your source files and re-indexes automatically whenever
+they change (1.5 s debounce, incremental — only changed files re-parsed). No
+manual `graphskill index` needed during a session.
 
 ---
 
@@ -237,7 +238,8 @@ graphskill setup /path/to/repo-b
 graphskill projects          # list everything indexed, with DB locations
 ```
 
-After editing a repo, refresh just that one: `graphskill index /path/to/repo-a`.
+The server auto-refreshes while a session is open. To rebuild outside a session
+(e.g. after switching branches), run: `graphskill index /path/to/repo-a`.
 
 ### Viewing the graph in a browser
 
@@ -339,6 +341,9 @@ code ──► tree-sitter ──► symbols + edges ──► KuzuDB ──► 
   (`graphskill/manifest.py`, `graphskill/index.py`).
 - **Query** — MCP server over stdio (`graphskill/mcp_server.py`); the query
   logic lives in a plain, unit-testable `GraphQueries` class.
+- **Live re-index** — a `watchdog` observer runs in a daemon thread inside the
+  server process. Source file changes trigger an incremental `build_index()` +
+  store swap (under a lock) within ~1.5 s, with no server restart required.
 
 ---
 
@@ -351,6 +356,7 @@ Measured on a ~2,600-file PHP/JS/TS codebase (≈14k symbols, ≈80k edges):
 | Initial full index | ~56s (one-time) |
 | Re-index after editing a few files | seconds (only changed files re-parsed) |
 | Re-index with no changes | instant (hash short-circuit) |
+| Auto re-index latency (file watcher) | ~1.5 s after last save |
 
 The initial build is write-bound (inserting tens of thousands of nodes/edges);
 incremental updates and queries are fast.

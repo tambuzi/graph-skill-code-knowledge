@@ -13,6 +13,7 @@ dependencies = [
     "kuzu>=0.11",
     "mcp[cli]>=1.2",
     "click>=8.1",
+    "watchdog>=4.0",
 ]
 
 [project.scripts]
