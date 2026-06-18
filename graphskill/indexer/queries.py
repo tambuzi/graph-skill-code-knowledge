@@ -145,7 +145,18 @@ USES: dict[str, str] = {
         (scoped_call_expression scope: (qualified_name) @use)
         (class_constant_access_expression (name) @use)
     """,
+    # Simple type names only — generics (Optional[X], List[X]) not captured.
+    "python": """
+        (typed_parameter type: (type (identifier) @use))
+        (function_definition return_type: (type (identifier) @use))
+        (assignment type: (type (identifier) @use))
+    """,
+    # Captures all type_identifier nodes inside type annotations (method params,
+    # return types, property declarations). Generic args like Array<X> are also
+    # captured; non-class names are silently dropped at resolution.
+    "typescript": "(type_annotation (type_identifier) @use)",
 }
+USES["tsx"] = USES["typescript"]
 
 # Generic fallback for languages without a DEFS entry. A node is treated as a
 # definition when its type ends with one of these suffixes or matches an exact

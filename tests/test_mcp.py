@@ -126,3 +126,93 @@ def test_confidence_callees_depth1(gq):
     callees_list = gq.callees("login")
     assert len(callees_list) > 0
     assert all("confidence" in r for r in callees_list)
+
+
+# ---- compact format ----
+
+def test_compact_search_symbols(gq):
+    results = gq.search_symbols("login", compact=True)
+    assert len(results) > 0
+    assert isinstance(results[0], str)
+    parts = results[0].split("\t")
+    assert len(parts) == 4  # name, kind, location, signature
+
+
+def test_compact_symbols_in_file(gq):
+    results = gq.symbols_in_file("auth.py", compact=True)
+    assert len(results) > 0
+    assert isinstance(results[0], str)
+    assert "\t" in results[0]
+
+
+def test_compact_callers(gq):
+    results = gq.callers("connect", compact=True)
+    assert len(results) > 0
+    assert isinstance(results[0], str)
+    parts = results[0].split("\t")
+    assert len(parts) == 3  # name, location, confidence (depth=1)
+
+
+def test_compact_inheritors(gq):
+    results = gq.inheritors("BaseUser", compact=True)
+    assert len(results) > 0
+    assert isinstance(results[0], str)
+    parts = results[0].split("\t")
+    assert len(parts) == 3  # name, kind, location
+
+
+# ---- pagination ----
+
+def test_pagination_offset(gq):
+    # "n" appears in: connect, login (×2), name, open_pool, Session — ≥6 matches
+    page1 = gq.search_symbols("n", limit=3, offset=0)
+    page2 = gq.search_symbols("n", limit=3, offset=3)
+    names1 = {r["name"] for r in page1}
+    names2 = {r["name"] for r in page2}
+    assert len(page1) == 3
+    assert names1.isdisjoint(names2)
+
+
+def test_pagination_past_end(gq):
+    results = gq.search_symbols("login", limit=5, offset=1000)
+    assert results == []
+
+
+# ---- new tools ----
+
+def test_module_overview(gq):
+    modules = gq.module_overview()
+    module_names = {m["module"] for m in modules}
+    assert "auth.py" in module_names
+    assert "db.py" in module_names
+    auth_mod = next(m for m in modules if m["module"] == "auth.py")
+    assert auth_mod["files"] == 1
+    assert isinstance(auth_mod.get("class") or auth_mod.get("function") or 0, int)
+
+
+def test_hot_symbols(gq):
+    hot = gq.hot_symbols(n=5, edge="CALLS")
+    assert len(hot) > 0
+    assert all("name" in h and "in_degree" in h for h in hot)
+    assert all(h["in_degree"] >= 1 for h in hot)
+    # sorted descending
+    degrees = [h["in_degree"] for h in hot]
+    assert degrees == sorted(degrees, reverse=True)
+
+
+def test_hot_symbols_invalid_edge(gq):
+    assert gq.hot_symbols(edge="INVALID") == []
+
+
+def test_architecture_violations_imports(gq):
+    violations = gq.architecture_violations("auth", "db", edge="IMPORTS")
+    assert len(violations) > 0
+    assert any(v["from"] == "auth.py" and v["to"] == "db.py" for v in violations)
+
+
+def test_architecture_violations_no_match(gq):
+    assert gq.architecture_violations("db", "auth", edge="IMPORTS") == []
+
+
+def test_architecture_violations_invalid_edge(gq):
+    assert gq.architecture_violations("auth", "db", edge="INVALID") == []

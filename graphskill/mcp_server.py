@@ -46,22 +46,25 @@ class GraphQueries:
             self.store = GraphStore(self.db_path)
 
     # ---- discovery ----
-    def search_symbols(self, query: str, kind: str | None = None, limit: int = 20) -> list[dict]:
+    def search_symbols(self, query: str, kind: str | None = None, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
         cypher = (
             "MATCH (s:Symbol) WHERE lower(s.name) CONTAINS lower($q) "
             + ("AND s.kind = $kind " if kind else "")
             + "RETURN s.id AS id, s.name AS name, s.kind AS kind, "
             "s.path AS path, s.line_start AS line, s.signature AS signature "
-            "ORDER BY s.name LIMIT $lim"
+            "ORDER BY s.name SKIP $skip LIMIT $lim"
         )
-        params = {"q": query, "lim": limit}
+        params = {"q": query, "lim": limit, "skip": offset}
         if kind:
             params["kind"] = kind
-        return [
+        rows = [
             {"id": r["id"], "name": r["name"], "kind": r["kind"],
              "location": f"{r['path']}:{r['line']}", "signature": r["signature"]}
             for r in self._q(cypher, params)
         ]
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}\t{r['signature']}" for r in rows]
+        return rows
 
     def get_symbol(self, ref: str) -> dict | None:
         rows = self._q("MATCH (s:Symbol {id:$r}) RETURN s.*", {"r": ref})
@@ -101,7 +104,7 @@ class GraphQueries:
     def _depth(self, depth: int) -> int:
         return max(1, min(int(depth), _MAX_DEPTH))
 
-    def callers(self, name: str, depth: int = 1) -> list[dict]:
+    def callers(self, name: str, depth: int = 1, compact: bool = False) -> list:
         d = self._depth(depth)
         if d == 1:
             rows = self._q(
@@ -109,13 +112,19 @@ class GraphQueries:
                 "RETURN DISTINCT a.name AS name, a.path AS path, a.line_start AS line, e.confidence AS confidence",
                 {"n": name},
             )
-            return [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+            results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+            if compact:
+                return [f"{r['name']}\t{r['location']}\t{r['confidence']}" for r in results]
+            return results
         rows = self._q(
             f"MATCH (a:Symbol)-[:CALLS*1..{d}]->(b:Symbol {{name:$n}}) "
             "RETURN DISTINCT a.name AS name, a.path AS path, a.line_start AS line", {"n": name})
-        return [{"name": r["name"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        if compact:
+            return [f"{r['name']}\t{r['location']}" for r in results]
+        return results
 
-    def callees(self, name: str, depth: int = 1) -> list[dict]:
+    def callees(self, name: str, depth: int = 1, compact: bool = False) -> list:
         d = self._depth(depth)
         if d == 1:
             rows = self._q(
@@ -123,25 +132,37 @@ class GraphQueries:
                 "RETURN DISTINCT b.name AS name, b.path AS path, b.line_start AS line, e.confidence AS confidence",
                 {"n": name},
             )
-            return [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+            results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+            if compact:
+                return [f"{r['name']}\t{r['location']}\t{r['confidence']}" for r in results]
+            return results
         rows = self._q(
             f"MATCH (a:Symbol {{name:$n}})-[:CALLS*1..{d}]->(b:Symbol) "
             "RETURN DISTINCT b.name AS name, b.path AS path, b.line_start AS line", {"n": name})
-        return [{"name": r["name"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        if compact:
+            return [f"{r['name']}\t{r['location']}" for r in results]
+        return results
 
-    def uses(self, name: str) -> list[dict]:
+    def uses(self, name: str, compact: bool = False) -> list:
         rows = self._q(
             "MATCH (a:Symbol {name:$n})-[e:USES]->(b:Symbol) "
             "RETURN DISTINCT b.name AS name, b.kind AS kind, b.path AS path, b.line_start AS line, e.confidence AS confidence "
             "ORDER BY name", {"n": name})
-        return [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+        results = [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}\t{r['confidence']}" for r in results]
+        return results
 
-    def used_by(self, name: str) -> list[dict]:
+    def used_by(self, name: str, compact: bool = False) -> list:
         rows = self._q(
             "MATCH (a:Symbol)-[e:USES]->(b:Symbol {name:$n}) "
             "RETURN DISTINCT a.name AS name, a.kind AS kind, a.path AS path, a.line_start AS line, e.confidence AS confidence "
             "ORDER BY name", {"n": name})
-        return [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+        results = [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}\t{r['confidence']}" for r in results]
+        return results
 
     def imports(self, path: str) -> list[str]:
         rows = self._q(
@@ -171,7 +192,7 @@ class GraphQueries:
 
     # ---- new tools ----
 
-    def symbols_in_file(self, path: str) -> list[dict]:
+    def symbols_in_file(self, path: str, compact: bool = False) -> list:
         rows = self._q(
             "MATCH (s:Symbol {path: $p}) "
             "RETURN s.id AS id, s.name AS name, s.kind AS kind, "
@@ -180,12 +201,15 @@ class GraphQueries:
             "ORDER BY s.line_start",
             {"p": path},
         )
-        return [
+        results = [
             {"id": r["id"], "name": r["name"], "kind": r["kind"],
              "location": f"{path}:{r['line_start']}-{r['line_end']}",
              "signature": r["signature"], "doc": r["doc"]}
             for r in rows
         ]
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}\t{r['signature']}" for r in results]
+        return results
 
     def batch_read_symbol_bodies(self, refs: list[str]) -> list[dict]:
         out = []
@@ -198,38 +222,47 @@ class GraphQueries:
                 out.append({"ref": ref, "error": "not found"})
         return out
 
-    def inheritors(self, name: str, depth: int = 1) -> list[dict]:
+    def inheritors(self, name: str, depth: int = 1, compact: bool = False) -> list:
         d = self._depth(depth)
         rows = self._q(
             f"MATCH (a:Symbol)-[:INHERITS*1..{d}]->(b:Symbol {{name:$n}}) "
             "RETURN DISTINCT a.name AS name, a.kind AS kind, a.path AS path, a.line_start AS line",
             {"n": name},
         )
-        return [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        results = [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}" for r in results]
+        return results
 
-    def inherited_from(self, name: str, depth: int = 1) -> list[dict]:
+    def inherited_from(self, name: str, depth: int = 1, compact: bool = False) -> list:
         d = self._depth(depth)
         rows = self._q(
             f"MATCH (a:Symbol {{name:$n}})-[:INHERITS*1..{d}]->(b:Symbol) "
             "RETURN DISTINCT b.name AS name, b.kind AS kind, b.path AS path, b.line_start AS line",
             {"n": name},
         )
-        return [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        results = [{"name": r["name"], "kind": r["kind"], "location": f"{r['path']}:{r['line']}"} for r in rows]
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}" for r in results]
+        return results
 
-    def search_docs(self, query: str, limit: int = 20) -> list[dict]:
+    def search_docs(self, query: str, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
         rows = self._q(
             "MATCH (s:Symbol) "
             "WHERE lower(s.doc) CONTAINS lower($q) AND s.doc <> '' "
             "RETURN s.id AS id, s.name AS name, s.kind AS kind, "
             "s.path AS path, s.line_start AS line, s.doc AS doc "
-            "ORDER BY s.name LIMIT $lim",
-            {"q": query, "lim": limit},
+            "ORDER BY s.name SKIP $skip LIMIT $lim",
+            {"q": query, "lim": limit, "skip": offset},
         )
-        return [
+        results = [
             {"id": r["id"], "name": r["name"], "kind": r["kind"],
              "location": f"{r['path']}:{r['line']}", "doc": r["doc"]}
             for r in rows
         ]
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}" for r in results]
+        return results
 
     def list_files(self, dir_prefix: str | None = None) -> list[str]:
         prefix = dir_prefix or ""
@@ -240,6 +273,70 @@ class GraphQueries:
             {"prefix": prefix},
         )
         return [r["path"] for r in rows]
+
+    def module_overview(self, dir_prefix: str | None = None) -> list[dict]:
+        prefix = dir_prefix or ""
+        rows = self._q(
+            "MATCH (s:Symbol) "
+            "WHERE $prefix = '' OR s.path STARTS WITH $prefix "
+            "RETURN s.path AS path, s.kind AS kind",
+            {"prefix": prefix},
+        )
+        from collections import defaultdict
+        kind_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        file_sets: dict[str, set[str]] = defaultdict(set)
+        for r in rows:
+            parts = r["path"].split("/")
+            mod = parts[0] if len(parts) > 1 else r["path"]
+            kind_counts[mod][r["kind"]] += 1
+            file_sets[mod].add(r["path"])
+        return [
+            {"module": mod, "files": len(file_sets[mod]), **dict(kind_counts[mod])}
+            for mod in sorted(kind_counts)
+        ]
+
+    def hot_symbols(self, n: int = 10, edge: str = "CALLS") -> list[dict]:
+        """Most-referenced symbols by incoming edge count (god nodes)."""
+        valid = {"CALLS", "USES", "INHERITS"}
+        if edge not in valid:
+            return []
+        rows = self._q(
+            f"MATCH ()-[:{edge}]->(b:Symbol) "
+            "RETURN b.name AS name, b.kind AS kind, b.path AS path, b.line_start AS line, count(*) AS in_degree "
+            "ORDER BY in_degree DESC LIMIT $n",
+            {"n": n},
+        )
+        return [
+            {"name": r["name"], "kind": r["kind"],
+             "location": f"{r['path']}:{r['line']}", "in_degree": r["in_degree"]}
+            for r in rows
+        ]
+
+    def architecture_violations(self, from_prefix: str, not_to_prefix: str, edge: str = "IMPORTS") -> list[dict]:
+        """Edges crossing a layer boundary: from files/symbols under from_prefix to those under not_to_prefix."""
+        if edge == "IMPORTS":
+            rows = self._q(
+                "MATCH (a:File)-[:IMPORTS]->(b:File) "
+                "WHERE a.path STARTS WITH $from AND b.path STARTS WITH $to "
+                "RETURN a.path AS from_path, b.path AS to_path ORDER BY a.path",
+                {"from": from_prefix, "to": not_to_prefix},
+            )
+            return [{"from": r["from_path"], "to": r["to_path"]} for r in rows]
+        valid = {"CALLS", "USES", "INHERITS"}
+        if edge not in valid:
+            return []
+        rows = self._q(
+            f"MATCH (a:Symbol)-[:{edge}]->(b:Symbol) "
+            "WHERE a.path STARTS WITH $from AND b.path STARTS WITH $to "
+            "RETURN DISTINCT a.name AS from_name, a.path AS from_path, "
+            "b.name AS to_name, b.path AS to_path ORDER BY a.path",
+            {"from": from_prefix, "to": not_to_prefix},
+        )
+        return [
+            {"from": f"{r['from_name']} ({r['from_path']})",
+             "to": f"{r['to_name']} ({r['to_path']})"}
+            for r in rows
+        ]
 
     def subgraph(self, names: list[str], depth: int = 1) -> dict:
         d = max(1, min(int(depth), 2))
@@ -341,9 +438,9 @@ def run_server(db_path: str, root: str) -> None:
     os.chdir(_cwd)
 
     @mcp.tool()
-    def search_symbols(query: str, kind: str | None = None, limit: int = 20) -> list[dict]:
-        """Find symbols by name substring. Returns id, kind, location, signature. Use this before grep."""
-        return gq.search_symbols(query, kind, limit)
+    def search_symbols(query: str, kind: str | None = None, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
+        """Find symbols by name substring. Returns id, kind, location, signature. Use before grep. compact=True → tab-separated strings (fewer tokens). offset for pagination."""
+        return gq.search_symbols(query, kind, limit, offset, compact)
 
     @mcp.tool()
     def get_symbol(ref: str) -> dict | None:
@@ -356,24 +453,24 @@ def run_server(db_path: str, root: str) -> None:
         return gq.read_symbol_body(ref)
 
     @mcp.tool()
-    def callers(name: str, depth: int = 1) -> list[dict]:
-        """Symbols that call `name` (transitively up to depth)."""
-        return gq.callers(name, depth)
+    def callers(name: str, depth: int = 1, compact: bool = False) -> list:
+        """Symbols that call `name` (transitively up to depth). compact=True → tab-separated rows. depth=1 includes confidence."""
+        return gq.callers(name, depth, compact)
 
     @mcp.tool()
-    def callees(name: str, depth: int = 1) -> list[dict]:
-        """Symbols called by `name` (transitively up to depth)."""
-        return gq.callees(name, depth)
+    def callees(name: str, depth: int = 1, compact: bool = False) -> list:
+        """Symbols called by `name` (transitively up to depth). compact=True → tab-separated rows. depth=1 includes confidence."""
+        return gq.callees(name, depth, compact)
 
     @mcp.tool()
-    def uses(name: str) -> list[dict]:
-        """Classes/interfaces/traits that `name` (a class) depends on — via type-hints, `new`, or static access."""
-        return gq.uses(name)
+    def uses(name: str, compact: bool = False) -> list:
+        """Classes/interfaces/traits that `name` (a class) depends on — via type-hints, `new`, or static access. Includes confidence."""
+        return gq.uses(name, compact)
 
     @mcp.tool()
-    def used_by(name: str) -> list[dict]:
-        """Classes that depend on `name` (reverse of `uses`)."""
-        return gq.used_by(name)
+    def used_by(name: str, compact: bool = False) -> list:
+        """Classes that depend on `name` (reverse of `uses`). Includes confidence."""
+        return gq.used_by(name, compact)
 
     @mcp.tool()
     def imports(path: str) -> list[str]:
@@ -396,9 +493,9 @@ def run_server(db_path: str, root: str) -> None:
         return gq.overview()
 
     @mcp.tool()
-    def symbols_in_file(path: str) -> list[dict]:
-        """All symbols defined in a file (name, kind, signature, line). Use instead of reading the whole file."""
-        return gq.symbols_in_file(path)
+    def symbols_in_file(path: str, compact: bool = False) -> list:
+        """All symbols defined in a file (name, kind, signature, line). Use instead of reading the whole file. compact=True → tab-separated strings."""
+        return gq.symbols_in_file(path, compact)
 
     @mcp.tool()
     def batch_read_symbol_bodies(refs: list[str]) -> list[dict]:
@@ -406,19 +503,19 @@ def run_server(db_path: str, root: str) -> None:
         return gq.batch_read_symbol_bodies(refs)
 
     @mcp.tool()
-    def inheritors(name: str, depth: int = 1) -> list[dict]:
-        """Classes/interfaces that inherit from or implement `name` (transitively up to depth)."""
-        return gq.inheritors(name, depth)
+    def inheritors(name: str, depth: int = 1, compact: bool = False) -> list:
+        """Classes/interfaces that inherit from or implement `name` (transitively up to depth). compact=True → tab-separated strings."""
+        return gq.inheritors(name, depth, compact)
 
     @mcp.tool()
-    def inherited_from(name: str, depth: int = 1) -> list[dict]:
-        """Base classes/interfaces that `name` extends or implements (transitively up to depth)."""
-        return gq.inherited_from(name, depth)
+    def inherited_from(name: str, depth: int = 1, compact: bool = False) -> list:
+        """Base classes/interfaces that `name` extends or implements (transitively up to depth). compact=True → tab-separated strings."""
+        return gq.inherited_from(name, depth, compact)
 
     @mcp.tool()
-    def search_docs(query: str, limit: int = 20) -> list[dict]:
-        """Search symbol docstrings and preceding comments by substring. Finds symbols described in comments, not just by name."""
-        return gq.search_docs(query, limit)
+    def search_docs(query: str, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
+        """Search symbol docstrings and preceding comments by substring. Finds symbols described in comments, not just by name. compact=True → tab-separated strings. offset for pagination."""
+        return gq.search_docs(query, limit, offset, compact)
 
     @mcp.tool()
     def list_files(dir_prefix: str | None = None) -> list[str]:
@@ -429,5 +526,20 @@ def run_server(db_path: str, root: str) -> None:
     def subgraph(names: list[str], depth: int = 1) -> dict:
         """Callers + callees + uses + used_by for a set of symbols in one call. Replaces multiple sequential queries."""
         return gq.subgraph(names, depth)
+
+    @mcp.tool()
+    def module_overview(dir_prefix: str | None = None) -> list[dict]:
+        """Symbol counts grouped by top-level directory (module). Much lighter than overview() on large repos."""
+        return gq.module_overview(dir_prefix)
+
+    @mcp.tool()
+    def hot_symbols(n: int = 10, edge: str = "CALLS") -> list[dict]:
+        """Most-referenced symbols by incoming edge count — god nodes / entry points. edge: CALLS, USES, or INHERITS."""
+        return gq.hot_symbols(n, edge)
+
+    @mcp.tool()
+    def architecture_violations(from_prefix: str, not_to_prefix: str, edge: str = "IMPORTS") -> list[dict]:
+        """Find all edges from files/symbols under from_prefix to those under not_to_prefix. Detects cross-layer dependencies. edge: IMPORTS, CALLS, USES, or INHERITS."""
+        return gq.architecture_violations(from_prefix, not_to_prefix, edge)
 
     mcp.run()

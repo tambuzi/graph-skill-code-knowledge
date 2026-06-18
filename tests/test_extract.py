@@ -75,6 +75,28 @@ def test_php_uses_edges(tmp_path):
     assert "Svc" not in referenced  # no self-reference
 
 
+def test_python_uses_edges(tmp_path):
+    f = tmp_path / "svc.py"
+    f.write_text(
+        "class Repo:\n"
+        "    pass\n"
+        "\n"
+        "class Service:\n"
+        "    def process(self, repo: Repo) -> Repo:\n"
+        "        return repo\n"
+    )
+    fx = extract_file(f, "svc.py")
+    referenced = {name for _, name in fx.uses}
+    assert "Repo" in referenced
+    assert "Service" not in referenced  # no self-reference
+
+
+def test_typescript_uses_edges():
+    fx = extract_file(f"{FIX}/service.ts", "service.ts")
+    referenced = {name for _, name in fx.uses}
+    assert "User" in referenced
+
+
 def test_generic_fallback_for_unqueried_language(tmp_path):
     # C and Ruby have no per-language DEFS entry -> generic fallback must still
     # yield symbols (the language-agnostic guarantee).
