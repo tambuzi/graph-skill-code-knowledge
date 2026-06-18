@@ -262,22 +262,46 @@ MATCH p=(a:Symbol {name:'MyClass'})-[:USES|CALLS|CONTAINS*1..2]-(b) RETURN p LIM
 
 ## MCP tools reference
 
+### Discovery
+
 | Tool | What it returns |
 |------|-----------------|
 | `search_symbols(query, kind?, limit?)` | Symbols whose name contains `query` → id, kind, `path:line`, signature. **Use before grep.** |
+| `search_docs(query, limit?)` | Symbols whose docstring/comment contains `query`. Finds things described in comments, not just by name. |
 | `get_symbol(ref)` | Signature, docstring, kind, location for one symbol. |
+| `list_files(dir_prefix?)` | All indexed file paths, optionally filtered by directory prefix. Lighter than `overview()`. |
+
+### Reading source
+
+| Tool | What it returns |
+|------|-----------------|
 | `read_symbol_body(ref)` | The exact source of **one** function/class/method — not the whole file. |
-| `callers(name, depth?)` | Symbols that call `name` (transitive up to `depth`). |
-| `callees(name, depth?)` | Symbols called by `name` (transitive up to `depth`). |
-| `uses(name)` | Types a class depends on (constructor/property type-hints, `new`, static access). |
-| `used_by(name)` | Types that depend on a class (reverse of `uses`). |
+| `batch_read_symbol_bodies(refs)` | Multiple symbol bodies in one call — saves round-trips vs repeated `read_symbol_body`. |
+| `symbols_in_file(path)` | All symbols defined in a file (name, kind, signature, line). **Use instead of reading the whole file just to see its structure.** |
+
+### Graph traversal
+
+| Tool | What it returns |
+|------|-----------------|
+| `callers(name, depth?)` | Symbols that call `name` (transitive up to `depth`). Includes `confidence` at depth=1. |
+| `callees(name, depth?)` | Symbols called by `name` (transitive up to `depth`). Includes `confidence` at depth=1. |
+| `uses(name)` | Types a class depends on (type-hints, `new`, static access). Includes `confidence`. |
+| `used_by(name)` | Types that depend on a class (reverse of `uses`). Includes `confidence`. |
+| `inheritors(name, depth?)` | Classes/interfaces that inherit from or implement `name` (transitive up to `depth`). |
+| `inherited_from(name, depth?)` | Base classes/interfaces that `name` extends or implements (transitive up to `depth`). |
 | `imports(path)` | Files imported by a file. |
 | `dependents(path)` | Files that import a file. |
 | `path(src_name, dst_name)` | Shortest call chain between two symbols (list of names), or null. |
+| `subgraph(names, depth?)` | Callers + callees + uses + used_by for a set of symbols in one call. Replaces multiple sequential queries. `depth` capped at 2. |
 | `overview()` | Per-file symbol counts plus graph totals. |
 
 `ref` accepts a symbol **id** (`path#byte`, exact) or a **name** (first match).
-`depth` is clamped to 1–6.
+`depth` is clamped to 1–6 (1–2 for `subgraph`).
+
+**Confidence tags** — `callers`, `callees`, `uses`, and `used_by` include a
+`confidence` field on each result: `EXTRACTED` (unambiguous), `INFERRED` (via
+import), or `AMBIGUOUS` (multiple candidates). Use this to decide whether to
+verify an edge with `read_symbol_body` before acting on it.
 
 ---
 
@@ -438,9 +462,20 @@ avoiding reading files that were already correct.
 - `read_symbol_body(ref)` returns one class or function — not the whole file.
 - `search_symbols(query)` returns structured name/location/signature rows —
   no grep output noise or false positives to filter.
+- `symbols_in_file(path)` returns all signatures in a file without reading the
+  file body — replaces opening a 300-line file just to see what methods exist.
+- `batch_read_symbol_bodies(refs)` reads N bodies in one call — replaces N
+  sequential tool calls each with their own framing overhead.
+- `inheritors(name)` finds all implementors of an interface in one query —
+  replaces grepping for class declarations across hundreds of files.
+- `subgraph(names)` returns the full call/dependency neighbourhood in one call
+  — replaces four separate `callers`/`callees`/`uses`/`used_by` queries.
+- `confidence` on edge results tells Claude when to trust an edge vs. verify —
+  prevents body reads wasted on AMBIGUOUS false edges.
 
 The efficiency gap is largest when violations are **sparse** (few bad files in a
-large codebase): grep must scan everything; the graph answers in one hop.
+large codebase) or **structural** (inheritance, interfaces): grep must scan
+everything; the graph answers in one hop.
 
 ---
 
