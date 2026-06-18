@@ -150,7 +150,7 @@ def test_compact_callers(gq):
     assert len(results) > 0
     assert isinstance(results[0], str)
     parts = results[0].split("\t")
-    assert len(parts) == 3  # name, location, confidence (depth=1)
+    assert len(parts) == 4  # name, location, confidence, @call_line (depth=1)
 
 
 def test_compact_inheritors(gq):
@@ -216,3 +216,59 @@ def test_architecture_violations_no_match(gq):
 
 def test_architecture_violations_invalid_edge(gq):
     assert gq.architecture_violations("auth", "db", edge="INVALID") == []
+
+
+# ---- repo map ----
+
+def test_repo_map_returns_ranked_rows(gq):
+    rows = gq.repo_map(budget_tokens=2000)
+    assert len(rows) > 0
+    # rows are "rank\tkind\tlocation\tsignature"; ranks descending
+    ranks = [float(r.split("\t")[0]) for r in rows]
+    assert ranks == sorted(ranks, reverse=True)
+
+
+def test_repo_map_budget_caps_output(gq):
+    big = gq.repo_map(budget_tokens=2000)
+    tiny = gq.repo_map(budget_tokens=5)
+    assert len(tiny) < len(big)
+
+
+def test_repo_map_prefix(gq):
+    rows = gq.repo_map(dir_prefix="auth")
+    assert all("\tauth.py:" in r for r in rows)
+
+
+# ---- semantic search ----
+
+def test_search_semantic_finds_auth(gq):
+    # embeddings written at index time; if model unavailable the sidecar is
+    # absent and this returns [] — only assert when embeddings are present.
+    if gq._emb_matrix is None:
+        import pytest
+        pytest.skip("embeddings sidecar not present")
+    results = gq.search_semantic("user login authentication", limit=5)
+    names = {r["name"] for r in results}
+    assert "login" in names or "hash_password" in names
+    assert all("score" in r for r in results)
+
+
+# ---- call-site line + visibility ----
+
+def test_callers_include_call_line(gq):
+    callers_list = gq.callers("connect")
+    assert callers_list and all("call_line" in c for c in callers_list)
+    login_caller = next(c for c in callers_list if c["name"] == "login")
+    assert login_caller["call_line"] == 18
+
+
+def test_search_symbols_visibility_filter(gq):
+    pub = gq.search_symbols("login", visibility="public")
+    assert any(r["name"] == "login" for r in pub)
+    priv = gq.search_symbols("login", visibility="private")
+    assert priv == []
+
+
+def test_symbols_in_file_includes_visibility(gq):
+    syms = gq.symbols_in_file("auth.py")
+    assert all("visibility" in s and "modifiers" in s for s in syms)

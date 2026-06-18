@@ -59,8 +59,12 @@ def resolve_calls(
     symbols: list[Symbol],
     callsites: list[CallSite],
     import_pairs: list[tuple[str, str]],
-) -> list[tuple[str, str, str]]:
-    """Resolve call sites -> (caller_id, callee_id, confidence)."""
+) -> list[tuple[str, str, str, int]]:
+    """Resolve call sites -> (caller_id, callee_id, confidence, line).
+
+    `line` is the source line of the (first) call site for that caller→callee
+    pair, so callers()/callees() can point at the exact call without a body read.
+    """
     by_name: dict[str, list[Symbol]] = defaultdict(list)
     for s in symbols:
         by_name[s.name].append(s)
@@ -69,26 +73,32 @@ def resolve_calls(
     for src, dst in import_pairs:
         imports_by_file[src].add(dst)
 
-    edges: set[tuple[str, str, str]] = set()
+    # keyed (caller, callee) -> (confidence, line); keep the first line seen.
+    edges: dict[tuple[str, str], tuple[str, int]] = {}
+
+    def _add(caller: str, callee: str, conf: str, line: int) -> None:
+        if (caller, callee) not in edges:
+            edges[(caller, callee)] = (conf, line)
+
     for cs in callsites:
         cands = by_name.get(cs.callee_name, [])
         if not cands:
             continue
         caller_path = path_of.get(cs.caller_id)
         if len(cands) == 1:
-            edges.add((cs.caller_id, cands[0].id, "EXTRACTED"))
+            _add(cs.caller_id, cands[0].id, "EXTRACTED", cs.line)
             continue
         same_file = [c for c in cands if c.path == caller_path]
         if len(same_file) == 1:
-            edges.add((cs.caller_id, same_file[0].id, "EXTRACTED"))
+            _add(cs.caller_id, same_file[0].id, "EXTRACTED", cs.line)
             continue
         imported = [c for c in cands if c.path in imports_by_file.get(caller_path, set())]
         if len(imported) == 1:
-            edges.add((cs.caller_id, imported[0].id, "INFERRED"))
+            _add(cs.caller_id, imported[0].id, "INFERRED", cs.line)
             continue
         for c in cands[:_AMBIGUOUS_CAP]:
-            edges.add((cs.caller_id, c.id, "AMBIGUOUS"))
-    return list(edges)
+            _add(cs.caller_id, c.id, "AMBIGUOUS", cs.line)
+    return [(a, b, conf, line) for (a, b), (conf, line) in edges.items()]
 
 
 def resolve_uses(

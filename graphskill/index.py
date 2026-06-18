@@ -16,7 +16,9 @@ import shutil
 import time
 from pathlib import Path
 
+from .indexer.embed import encode_symbols, write_sidecar
 from .indexer.extract import CallSite, FileExtract, Symbol, extract_file
+from .indexer.rank import pagerank
 from .indexer.resolve import resolve_calls, resolve_imports, resolve_inherits, resolve_uses
 from .manifest import file_hash, iter_source_files, load_manifest, save_manifest, SKIP_DIRS
 from .registry import project_db_path, update_registry
@@ -24,7 +26,7 @@ from .store import GraphStore
 
 
 # Bump when extraction logic changes, so stale cached extracts are invalidated.
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 
 def default_db_path(root: str | Path) -> Path:
@@ -123,6 +125,16 @@ def build_index(
     inherit_edges = resolve_inherits(all_symbols, inherit_pairs)
     uses_edges = resolve_uses(all_symbols, use_pairs)
 
+    # PageRank over the union of structural edges → Symbol.rank (for repo map).
+    rank_edges = (
+        [(a, b) for a, b, _c, _ln in call_edges]
+        + [(a, b) for a, b, _c in uses_edges]
+        + [(a, b) for a, b, _c in inherit_edges]
+    )
+    scores = pagerank([s.id for s in all_symbols], rank_edges)
+    for s in all_symbols:
+        s.rank = scores.get(s.id, 0.0)
+
     # Write a fresh graph (correctness over cleverness for cross-file edges).
     if db_path.exists():
         shutil.rmtree(db_path) if db_path.is_dir() else db_path.unlink()
@@ -131,13 +143,21 @@ def build_index(
     store.bulk_add_files([(fx.path, fx.lang, cur_hashes[fx.path]) for fx in extracts])
     store.bulk_add_symbols(all_symbols)
     store.bulk_add_symbol_rels("CONTAINS", all_contains, with_conf=False)
-    store.bulk_add_symbol_rels("CALLS", call_edges, with_conf=True)
+    store.bulk_add_calls(call_edges)
     store.bulk_add_symbol_rels("USES", uses_edges, with_conf=True)
     store.bulk_add_symbol_rels("INHERITS", inherit_edges, with_conf=True)
     store.bulk_add_imports(import_pairs)
 
     stats = store.stats()
     store.close()
+
+    # Sidecar embeddings for semantic search (best-effort; never fail the build).
+    try:
+        ids, matrix = encode_symbols(all_symbols)
+        write_sidecar(db_path.parent, ids, matrix)
+    except Exception as exc:  # model download/encode failure shouldn't break indexing
+        log(f"(embeddings skipped: {exc})")
+
     save_manifest(manifest_path, cur_hashes)
     update_registry(root, db=str(db_path), stats=stats, last_indexed=time.strftime('%Y-%m-%dT%H:%M:%S'))
     log("Done. " + ", ".join(f"{k}={v}" for k, v in stats.items()))

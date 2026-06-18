@@ -86,6 +86,48 @@ def query(cypher: str, root: str, db_path: str | None) -> None:
 @main.command()
 @click.argument("root", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--db", "db_path", type=click.Path(), default=None)
+@click.option("--dir", "dir_prefix", default=None, help="Limit to a directory prefix.")
+@click.option("--budget", default=2000, show_default=True, help="Approx token budget.")
+def map(root: str, db_path: str | None, dir_prefix: str | None, budget: int) -> None:
+    """Print a PageRank-ranked repo map (orientation view) for ROOT."""
+    from .mcp_server import GraphQueries
+
+    p = Path(db_path) if db_path else default_db_path(root)
+    if not p.exists():
+        raise click.ClickException(f"No graph at {p}. Run `graphskill index` first.")
+    gq = GraphQueries(p, root)
+    for line in gq.repo_map(dir_prefix, budget):
+        click.echo(line)
+    gq.close()
+
+
+@main.command()
+@click.argument("root", type=click.Path(exists=True, file_okay=False), default=".")
+def audit(root: str) -> None:
+    """Estimate per-turn input-token overhead of the MCP tool surface + skill."""
+    from .mcp_server import estimate_tool_overhead
+
+    ov = estimate_tool_overhead()
+    skill = Path(root).resolve() / ".claude" / "skills" / "graphskill" / "SKILL.md"
+    skill_tokens = (len(skill.read_text()) // 4) if skill.exists() else 0
+    per_turn = ov["tokens"] + skill_tokens
+
+    click.echo(f"Tools:            {ov['tool_count']}")
+    click.echo(f"Tool schemas:     ~{ov['tokens']} tokens / turn")
+    click.echo(f"SKILL.md:         ~{skill_tokens} tokens / turn")
+    click.echo(f"Total overhead:   ~{per_turn} tokens / turn")
+    # README measures ~5,000 tokens saved per graph query vs grep+Read on average.
+    avg_saving = 5000
+    breakeven = max(1, round(per_turn / avg_saving, 2))
+    click.echo(f"Break-even:       ~{breakeven} graph queries/session (@ ~{avg_saving} tok/query saved)")
+    click.echo("\nTop 5 tools by schema size:")
+    for name, chars in ov["per_tool"][:5]:
+        click.echo(f"  {name:<26} ~{chars // 4} tokens")
+
+
+@main.command()
+@click.argument("root", type=click.Path(exists=True, file_okay=False), default=".")
+@click.option("--db", "db_path", type=click.Path(), default=None)
 def serve(root: str, db_path: str | None) -> None:
     """Run the MCP server over the graph (stdio)."""
     from .mcp_server import run_server

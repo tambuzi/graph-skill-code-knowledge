@@ -34,6 +34,9 @@ class Symbol:
     end_byte: int
     signature: str
     doc: str
+    visibility: str = "public"
+    modifiers: str = ""
+    rank: float = 0.0
 
 
 @dataclass
@@ -210,7 +213,38 @@ def extract_file(abs_path: str | Path, rel_path: str) -> FileExtract | None:
     return fx
 
 
+_VIS_KEYWORDS = {"public", "private", "protected"}
+_MOD_KEYWORDS = {"static", "async", "abstract", "final", "readonly"}
+
+
+def _modifiers(node, name: str, lang: str) -> tuple[str, str]:
+    """Best-effort visibility + modifier extraction across grammars.
+
+    Reads only modifier/keyword child nodes (never large bodies), so it can't
+    false-match an identifier deep in the body. Falls back to Python's
+    underscore convention when the grammar has no visibility keyword.
+    """
+    visibility = "public"
+    mods: set[str] = set()
+    for c in node.children:
+        t = c.type
+        if t in _VIS_KEYWORDS:  # bare keyword token (e.g. TS `private`)
+            visibility = t
+        elif t in _MOD_KEYWORDS:  # bare keyword token (e.g. `static`, `async`)
+            mods.add(t)
+        elif t.endswith("_modifier"):  # PHP/TS wrapper node (visibility_modifier, …)
+            mtxt = c.text.decode("utf-8", "replace").strip()
+            if mtxt in _VIS_KEYWORDS:
+                visibility = mtxt
+            elif mtxt in _MOD_KEYWORDS:
+                mods.add(mtxt)
+    if lang == "python" and name.startswith("_") and not (name.startswith("__") and name.endswith("__")):
+        visibility = "private"
+    return visibility, ",".join(sorted(mods))
+
+
 def _make_symbol(node, name: str, kind: str, rel_path: str, lang: str, source: bytes) -> Symbol:
+    visibility, modifiers = _modifiers(node, name, lang)
     return Symbol(
         id=_sym_id(rel_path, node.start_byte),
         name=name,
@@ -223,6 +257,8 @@ def _make_symbol(node, name: str, kind: str, rel_path: str, lang: str, source: b
         end_byte=node.end_byte,
         signature=_first_line(node.text),
         doc=_preceding_comment(node, source),
+        visibility=visibility,
+        modifiers=modifiers,
     )
 
 

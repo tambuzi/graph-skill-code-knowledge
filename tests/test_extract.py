@@ -113,3 +113,48 @@ def test_generic_fallback_for_unqueried_language(tmp_path):
 
 def test_unknown_language_returns_none():
     assert extract_file("README.md", "README.md") is None
+
+
+def _by_name(symbols):
+    return {s.name: s for s in symbols}
+
+
+def test_php_visibility_and_modifiers(tmp_path):
+    f = tmp_path / "Svc.php"
+    f.write_text(
+        "<?php\n"
+        "class Svc {\n"
+        "    private static function secret() { return 1; }\n"
+        "    public function run() { return 2; }\n"
+        "}\n"
+    )
+    syms = _by_name(extract_file(f, "Svc.php").symbols)
+    assert syms["secret"].visibility == "private"
+    assert "static" in syms["secret"].modifiers
+    assert syms["run"].visibility == "public"
+
+
+def test_python_visibility_and_async(tmp_path):
+    f = tmp_path / "svc.py"
+    f.write_text(
+        "def public_fn():\n    return 1\n\n"
+        "def _private_fn():\n    return 2\n\n"
+        "async def fetch():\n    return 3\n"
+    )
+    syms = _by_name(extract_file(f, "svc.py").symbols)
+    assert syms["public_fn"].visibility == "public"
+    assert syms["_private_fn"].visibility == "private"
+    assert "async" in syms["fetch"].modifiers
+
+
+def test_typescript_visibility(tmp_path):
+    f = tmp_path / "s.ts"
+    f.write_text(
+        "class C {\n"
+        "  private secret() { return 1; }\n"
+        "  static make() { return 2; }\n"
+        "}\n"
+    )
+    syms = _by_name(extract_file(f, "s.ts").symbols)
+    assert syms["secret"].visibility == "private"
+    assert "static" in syms["make"].modifiers

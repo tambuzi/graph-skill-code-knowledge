@@ -49,6 +49,33 @@ def test_python_relative_imports_resolve(tmp_path):
     assert ("core.py", "store.py") in pairs
 
 
+def test_calls_have_line(sample_repo):
+    build_index(sample_repo)
+    store = GraphStore(default_db_path(sample_repo))
+    rows = store.query(
+        "MATCH (a:Symbol {name:'login'})-[c:CALLS]->(b:Symbol {name:'connect'}) "
+        "RETURN c.line AS line"
+    )
+    store.close()
+    assert rows and rows[0]["line"] == 18  # `conn = connect()` in auth.py
+
+
+def test_symbols_have_rank_and_visibility(sample_repo):
+    build_index(sample_repo)
+    store = GraphStore(default_db_path(sample_repo))
+    rows = store.query(
+        "MATCH (s:Symbol) RETURN s.name AS name, s.rank AS rank, s.visibility AS vis"
+    )
+    store.close()
+    by = {r["name"]: r for r in rows}
+    assert all(r["rank"] is not None for r in rows)
+    assert sum(r["rank"] for r in rows) > 0
+    # open_pool is a called sink; Handle is an uncalled caller — sink outranks.
+    # (both names are unique in the fixture, avoiding cross-file collisions)
+    assert by["open_pool"]["rank"] > by["Handle"]["rank"]
+    assert by["connect"]["vis"] == "public"
+
+
 def test_incremental_noop_and_change(sample_repo):
     build_index(sample_repo)
     db = default_db_path(sample_repo)

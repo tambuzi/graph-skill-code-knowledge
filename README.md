@@ -7,7 +7,9 @@ whole files.
 The goal is **token reduction**. Instead of `grep`-ing a repo and reading entire
 files to find a few relevant symbols, the agent asks the graph precise questions
 — *"where is `X`?"*, *"what calls `X`?"*, *"show me `X`'s body"*, *"shortest call
-chain `A`→`B`"* — and gets back exactly the bytes it needs.
+chain `A`→`B`"* — and gets back exactly the bytes it needs. It can also orient on
+an unfamiliar repo with a PageRank-ranked **repo map**, and find code by intent
+with local **semantic search** — no cloud, no API calls.
 
 Inspired by [graphify](https://github.com/safishamsi/graphify); tuned to a
 language-agnostic tree-sitter front end, an embedded KuzuDB store, an MCP query
@@ -262,46 +264,53 @@ MATCH p=(a:Symbol {name:'MyClass'})-[:USES|CALLS|CONTAINS*1..2]-(b) RETURN p LIM
 
 ## MCP tools reference
 
-### Discovery
+### Discovery / orientation
 
 | Tool | What it returns |
 |------|-----------------|
-| `search_symbols(query, kind?, limit?)` | Symbols whose name contains `query` → id, kind, `path:line`, signature. **Use before grep.** |
-| `search_docs(query, limit?)` | Symbols whose docstring/comment contains `query`. Finds things described in comments, not just by name. |
+| `repo_map(dir_prefix?, budget_tokens?)` | Top symbols by **PageRank**, trimmed to a token budget. Whole-repo orientation in ~1–2k tokens — **read first on an unfamiliar repo.** |
+| `search_semantic(query, limit?, compact?)` | Symbols ranked by **embedding similarity** to `query`. Finds code by *intent* even when the name doesn't match. |
+| `search_symbols(query, kind?, limit?, offset?, compact?, visibility?)` | Symbols whose name contains `query` → id, kind, `path:line`, signature, visibility, modifiers. **Use before grep.** |
+| `search_docs(query, limit?, offset?, compact?)` | Symbols whose docstring/comment contains `query`. |
 | `get_symbol(ref)` | Signature, docstring, kind, location for one symbol. |
-| `list_files(dir_prefix?)` | All indexed file paths, optionally filtered by directory prefix. Lighter than `overview()`. |
+| `list_files(dir_prefix?)` | All indexed file paths, optional directory-prefix filter. |
+| `module_overview(dir_prefix?)` | Symbol counts grouped by top-level directory. Lighter than `overview()` on big repos. |
+| `hot_symbols(n?, edge?)` | Most-referenced symbols by incoming edge count (god nodes). edge: CALLS/USES/INHERITS. |
+| `overview()` | Per-file symbol counts plus graph totals. |
 
 ### Reading source
 
 | Tool | What it returns |
 |------|-----------------|
 | `read_symbol_body(ref)` | The exact source of **one** function/class/method — not the whole file. |
-| `batch_read_symbol_bodies(refs)` | Multiple symbol bodies in one call — saves round-trips vs repeated `read_symbol_body`. |
-| `symbols_in_file(path)` | All symbols defined in a file (name, kind, signature, line). **Use instead of reading the whole file just to see its structure.** |
+| `batch_read_symbol_bodies(refs)` | Multiple symbol bodies in one call — saves round-trips. |
+| `symbols_in_file(path, compact?, visibility?)` | All symbols in a file (name, kind, signature, line, visibility, modifiers). **Use instead of reading the file to see its structure.** |
 
 ### Graph traversal
 
 | Tool | What it returns |
 |------|-----------------|
-| `callers(name, depth?)` | Symbols that call `name` (transitive up to `depth`). Includes `confidence` at depth=1. |
-| `callees(name, depth?)` | Symbols called by `name` (transitive up to `depth`). Includes `confidence` at depth=1. |
-| `uses(name)` | Types a class depends on (type-hints, `new`, static access). Includes `confidence`. |
-| `used_by(name)` | Types that depend on a class (reverse of `uses`). Includes `confidence`. |
-| `inheritors(name, depth?)` | Classes/interfaces that inherit from or implement `name` (transitive up to `depth`). |
-| `inherited_from(name, depth?)` | Base classes/interfaces that `name` extends or implements (transitive up to `depth`). |
-| `imports(path)` | Files imported by a file. |
-| `dependents(path)` | Files that import a file. |
-| `path(src_name, dst_name)` | Shortest call chain between two symbols (list of names), or null. |
-| `subgraph(names, depth?)` | Callers + callees + uses + used_by for a set of symbols in one call. Replaces multiple sequential queries. `depth` capped at 2. |
-| `overview()` | Per-file symbol counts plus graph totals. |
+| `callers(name, depth?, compact?)` | Symbols that call `name`. At depth=1 includes `confidence` + `call_line` (exact call site). |
+| `callees(name, depth?, compact?)` | Symbols called by `name`. At depth=1 includes `confidence` + `call_line`. |
+| `uses(name, compact?)` | Types a class depends on (type-hints, `new`, static access). Includes `confidence`. |
+| `used_by(name, compact?)` | Types that depend on a class (reverse of `uses`). Includes `confidence`. |
+| `inheritors(name, depth?, compact?)` | Classes/interfaces that inherit from or implement `name`. |
+| `inherited_from(name, depth?, compact?)` | Base classes/interfaces that `name` extends or implements. |
+| `imports(path)` / `dependents(path)` | Files a file imports / files that import it. |
+| `path(src_name, dst_name)` | Shortest call chain between two symbols, or null. |
+| `subgraph(names, depth?)` | callers + callees + uses + used_by for a set of symbols in one call. `depth` capped at 2. |
+| `architecture_violations(from_prefix, not_to_prefix, edge?)` | Edges crossing a layer boundary. edge: IMPORTS/CALLS/USES/INHERITS. |
 
 `ref` accepts a symbol **id** (`path#byte`, exact) or a **name** (first match).
 `depth` is clamped to 1–6 (1–2 for `subgraph`).
 
+**Compact mode** — most read/traversal tools accept `compact=True` to return
+tab-separated rows instead of JSON dicts (~50% fewer tokens). `search_symbols`
+and `search_docs` accept `offset` for pagination.
+
 **Confidence tags** — `callers`, `callees`, `uses`, and `used_by` include a
-`confidence` field on each result: `EXTRACTED` (unambiguous), `INFERRED` (via
-import), or `AMBIGUOUS` (multiple candidates). Use this to decide whether to
-verify an edge with `read_symbol_body` before acting on it.
+`confidence` field: `EXTRACTED` (unambiguous), `INFERRED` (via import), or
+`AMBIGUOUS` (multiple candidates) — verify `AMBIGUOUS` edges before acting.
 
 ---
 
@@ -315,6 +324,8 @@ verify an edge with `read_symbol_body` before acting on it.
 | `graphskill index <root> [--db PATH] [--full]` | Build/refresh the graph. `--full` forces a full rebuild (bypasses the extract cache). |
 | `graphskill stats <root> [--db PATH]` | Print node/edge counts as JSON. |
 | `graphskill query <cypher> <root> [--db PATH]` | Run raw Cypher against the graph. |
+| `graphskill map <root> [--dir PREFIX] [--budget N]` | Print a PageRank-ranked repo map (orientation view). |
+| `graphskill audit <root>` | Estimate per-turn input-token overhead of the MCP tool surface + skill. |
 | `graphskill serve <root> [--db PATH]` | Run the MCP server over stdio (used by `.mcp.json`). |
 
 `<root>` defaults to `.`. Each project's graph lives in an **isolated**
@@ -330,6 +341,8 @@ Two tiers:
 - **Full** — Python, JavaScript, TypeScript/TSX, Go, Rust, Java, **PHP**:
   symbols **plus** `CALLS`, `IMPORTS`, `INHERITS`, `CONTAINS` edges, via
   per-language tree-sitter queries (`graphskill/indexer/queries.py`).
+  `USES` (type-dependency) edges are extracted for **PHP, Python, and
+  TypeScript**. Visibility/modifier metadata is best-effort per language.
 - **Generic fallback** — any other tree-sitter language (C, C++, Ruby, C#,
   Swift, Kotlin, …): symbols (functions / classes / methods / structs / …) +
   `CONTAINS`, extracted heuristically by node-type keywords.
@@ -351,13 +364,19 @@ code ──► tree-sitter ──► symbols + edges ──► KuzuDB ──► 
 
 - **Parsing** — `tree-sitter-language-pack` precompiled grammars; language
   detected by file extension (`graphskill/parser.py`).
-- **Extraction** — symbols + `CONTAINS`/`IMPORTS`/`INHERITS`/`USES` edges and
-  call sites (`graphskill/indexer/extract.py`). `USES` = class→class
-  dependencies from type-hints, `new`, and static access (PHP). Compiled queries
+- **Extraction** — symbols (with visibility/modifier metadata) + `CONTAINS`/
+  `IMPORTS`/`INHERITS`/`USES` edges and call sites
+  (`graphskill/indexer/extract.py`). `USES` = class→class dependencies from
+  type-hints, `new`, and static access (PHP/Python/TypeScript). Compiled queries
   are cached per language.
 - **Resolution** — call/inherit/import targets resolved by name with a
   `confidence` tag: `EXTRACTED` (unique), `INFERRED` (via an import), or
-  `AMBIGUOUS` (multiple candidates) — `graphskill/indexer/resolve.py`.
+  `AMBIGUOUS` (multiple candidates) — `graphskill/indexer/resolve.py`. `CALLS`
+  edges also carry the call-site line.
+- **Ranking + embeddings** — after edges resolve, a pure-python PageRank scores
+  every symbol (`graphskill/indexer/rank.py`) and a local model2vec embedder
+  encodes each symbol into a sidecar `embeddings.npy`
+  (`graphskill/indexer/embed.py`) — powering `repo_map` and `search_semantic`.
 - **Store** — embedded KuzuDB; Cypher traversal including variable-depth
   `CALLS*1..N` and shortest paths (`graphskill/store.py`). Writes use batched
   `UNWIND` inserts.
@@ -477,6 +496,35 @@ The efficiency gap is largest when violations are **sparse** (few bad files in a
 large codebase) or **structural** (inheritance, interfaces): grep must scan
 everything; the graph answers in one hop.
 
+### Tool overhead (the other side of the ledger)
+
+The tool schemas + skill are sent as **input on every turn**, so they offset the
+per-query output savings. `graphskill audit` measures it:
+
+```
+$ graphskill audit .
+Tools:            23
+Tool schemas:     ~1734 tokens / turn
+SKILL.md:         ~290 tokens / turn
+Total overhead:   ~2024 tokens / turn
+Break-even:       ~1 graph queries/session (@ ~5000 tok/query saved)
+```
+
+Because a single graph query typically saves thousands of output tokens, the
+tool surface pays for itself after roughly one query per session. Tool
+docstrings are deliberately kept to one line (full guidance lives in `SKILL.md`)
+to keep this overhead low.
+
+### Orientation & intent (repo map + semantic search)
+
+- `repo_map()` ranks symbols by **PageRank** over the call/use/inherit graph and
+  returns the most important ones within a token budget — a whole-repo overview
+  for ~1–2k tokens instead of reading entry-point files.
+- `search_semantic()` matches by **meaning** (local model2vec embeddings, no
+  cloud), so an intent query like *"parse a source file into symbols"* returns
+  `parse_source` / `parse_file` even though the words don't appear in the names —
+  avoiding the failed-substring-search → grep → read-file retry loop.
+
 ---
 
 ## Tests
@@ -517,6 +565,13 @@ python -m pytest
   dynamic dispatch and same-named symbols across files can be imprecise — those
   edges are flagged `AMBIGUOUS`.
 - Calls into vendored/stdlib code are **not** nodes in the graph.
-- The graph is **structural**, not semantic: it tells you *what connects to
-  what*, not *why*. (Semantic summaries and community clustering are possible
-  future additions.)
+- The graph is primarily **structural**. `search_semantic` adds an embedding
+  layer for intent-based lookup, but the embedder is a small static model — good
+  for ranking by similarity, not for generating explanations. Per-symbol natural
+  language summaries and community clustering remain possible future additions.
+- Embeddings require a one-time model download (~30 MB from the HuggingFace hub)
+  on the first index; after that, encoding is fully local/offline. If the
+  download is unavailable, indexing still succeeds — `search_semantic` simply
+  returns nothing until embeddings exist.
+- `USES` edges cover PHP, Python, and TypeScript; other full-tier languages have
+  `CALLS`/`IMPORTS`/`INHERITS` only.

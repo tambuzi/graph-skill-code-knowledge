@@ -17,12 +17,13 @@ _SCHEMA = [
     """CREATE NODE TABLE IF NOT EXISTS Symbol(
         id STRING, name STRING, kind STRING, path STRING, lang STRING,
         line_start INT64, line_end INT64, start_byte INT64, end_byte INT64,
-        signature STRING, doc STRING, PRIMARY KEY(id))""",
+        signature STRING, doc STRING, visibility STRING, modifiers STRING,
+        rank DOUBLE, PRIMARY KEY(id))""",
     "CREATE REL TABLE IF NOT EXISTS DEFINED_IN(FROM Symbol TO File)",
     "CREATE REL TABLE IF NOT EXISTS CONTAINS(FROM Symbol TO Symbol)",
     "CREATE REL TABLE IF NOT EXISTS INHERITS(FROM Symbol TO Symbol, confidence STRING)",
     "CREATE REL TABLE IF NOT EXISTS IMPORTS(FROM File TO File)",
-    "CREATE REL TABLE IF NOT EXISTS CALLS(FROM Symbol TO Symbol, confidence STRING)",
+    "CREATE REL TABLE IF NOT EXISTS CALLS(FROM Symbol TO Symbol, confidence STRING, line INT64)",
     "CREATE REL TABLE IF NOT EXISTS USES(FROM Symbol TO Symbol, confidence STRING)",
 ]
 
@@ -57,11 +58,13 @@ class GraphStore:
             """MERGE (s:Symbol {id: $id})
                SET s.name=$name, s.kind=$kind, s.path=$path, s.lang=$lang,
                    s.line_start=$ls, s.line_end=$le, s.start_byte=$sb, s.end_byte=$eb,
-                   s.signature=$sig, s.doc=$doc""",
+                   s.signature=$sig, s.doc=$doc, s.visibility=$vis, s.modifiers=$mods,
+                   s.rank=$rank""",
             {
                 "id": s.id, "name": s.name, "kind": s.kind, "path": s.path, "lang": s.lang,
                 "ls": s.line_start, "le": s.line_end, "sb": s.start_byte, "eb": s.end_byte,
-                "sig": s.signature, "doc": s.doc,
+                "sig": s.signature, "doc": s.doc, "vis": s.visibility, "mods": s.modifiers,
+                "rank": s.rank,
             },
         )
         self.conn.execute(
@@ -122,7 +125,8 @@ class GraphStore:
                 {
                     "id": s.id, "name": s.name, "kind": s.kind, "path": s.path, "lang": s.lang,
                     "ls": s.line_start, "le": s.line_end, "sb": s.start_byte, "eb": s.end_byte,
-                    "sig": s.signature, "doc": s.doc,
+                    "sig": s.signature, "doc": s.doc, "vis": s.visibility, "mods": s.modifiers,
+                    "rank": s.rank,
                 }
                 for s in ch
             ]
@@ -130,7 +134,8 @@ class GraphStore:
                 """UNWIND $rows AS r CREATE (:Symbol {
                     id: r.id, name: r.name, kind: r.kind, path: r.path, lang: r.lang,
                     line_start: r.ls, line_end: r.le, start_byte: r.sb, end_byte: r.eb,
-                    signature: r.sig, doc: r.doc})""",
+                    signature: r.sig, doc: r.doc, visibility: r.vis, modifiers: r.mods,
+                    rank: r.rank})""",
                 {"rows": rows},
             )
         for ch in self._chunks(syms):
@@ -152,6 +157,16 @@ class GraphStore:
             self.conn.execute(
                 f"UNWIND $rows AS r MATCH (a:Symbol {{id: r.a}}), (b:Symbol {{id: r.b}}) "
                 f"CREATE (a)-[:{rel}{prop}]->(b)",
+                {"rows": rows},
+            )
+
+    def bulk_add_calls(self, edges: list[tuple[str, str, str, int]]) -> None:
+        """CALLS edges carry both confidence and the call-site line."""
+        for ch in self._chunks(edges):
+            rows = [{"a": a, "b": b, "conf": c, "line": ln} for a, b, c, ln in ch]
+            self.conn.execute(
+                "UNWIND $rows AS r MATCH (a:Symbol {id: r.a}), (b:Symbol {id: r.b}) "
+                "CREATE (a)-[:CALLS {confidence: r.conf, line: r.line}]->(b)",
                 {"rows": rows},
             )
 

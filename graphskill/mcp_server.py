@@ -34,6 +34,19 @@ class GraphQueries:
         self.root = Path(root).resolve()
         self._lock = threading.Lock()
         self.store = GraphStore(db_path)
+        self._emb_ids: list[str] | None = None
+        self._emb_matrix = None
+        self._load_embeddings()
+
+    def _load_embeddings(self) -> None:
+        """Load the embedding sidecar (if present) for semantic search."""
+        from .indexer.embed import load_sidecar
+
+        loaded = load_sidecar(self.db_path.parent)
+        if loaded is not None:
+            self._emb_ids, self._emb_matrix = loaded
+        else:
+            self._emb_ids, self._emb_matrix = None, None
 
     def _q(self, cypher: str, params: dict | None = None) -> list[dict]:
         with self._lock:
@@ -44,22 +57,28 @@ class GraphQueries:
         with self._lock:
             self.store.close()
             self.store = GraphStore(self.db_path)
+        self._load_embeddings()
 
     # ---- discovery ----
-    def search_symbols(self, query: str, kind: str | None = None, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
+    def search_symbols(self, query: str, kind: str | None = None, limit: int = 20, offset: int = 0, compact: bool = False, visibility: str | None = None) -> list:
         cypher = (
             "MATCH (s:Symbol) WHERE lower(s.name) CONTAINS lower($q) "
             + ("AND s.kind = $kind " if kind else "")
+            + ("AND s.visibility = $vis " if visibility else "")
             + "RETURN s.id AS id, s.name AS name, s.kind AS kind, "
-            "s.path AS path, s.line_start AS line, s.signature AS signature "
+            "s.path AS path, s.line_start AS line, s.signature AS signature, "
+            "s.visibility AS visibility, s.modifiers AS modifiers "
             "ORDER BY s.name SKIP $skip LIMIT $lim"
         )
         params = {"q": query, "lim": limit, "skip": offset}
         if kind:
             params["kind"] = kind
+        if visibility:
+            params["vis"] = visibility
         rows = [
             {"id": r["id"], "name": r["name"], "kind": r["kind"],
-             "location": f"{r['path']}:{r['line']}", "signature": r["signature"]}
+             "location": f"{r['path']}:{r['line']}", "signature": r["signature"],
+             "visibility": r["visibility"], "modifiers": r["modifiers"]}
             for r in self._q(cypher, params)
         ]
         if compact:
@@ -109,12 +128,12 @@ class GraphQueries:
         if d == 1:
             rows = self._q(
                 "MATCH (a:Symbol)-[e:CALLS]->(b:Symbol {name:$n}) "
-                "RETURN DISTINCT a.name AS name, a.path AS path, a.line_start AS line, e.confidence AS confidence",
+                "RETURN DISTINCT a.name AS name, a.path AS path, a.line_start AS line, e.confidence AS confidence, e.line AS call_line",
                 {"n": name},
             )
-            results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+            results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"], "call_line": r["call_line"]} for r in rows]
             if compact:
-                return [f"{r['name']}\t{r['location']}\t{r['confidence']}" for r in results]
+                return [f"{r['name']}\t{r['location']}\t{r['confidence']}\t@{r['call_line']}" for r in results]
             return results
         rows = self._q(
             f"MATCH (a:Symbol)-[:CALLS*1..{d}]->(b:Symbol {{name:$n}}) "
@@ -129,12 +148,12 @@ class GraphQueries:
         if d == 1:
             rows = self._q(
                 "MATCH (a:Symbol {name:$n})-[e:CALLS]->(b:Symbol) "
-                "RETURN DISTINCT b.name AS name, b.path AS path, b.line_start AS line, e.confidence AS confidence",
+                "RETURN DISTINCT b.name AS name, b.path AS path, b.line_start AS line, e.confidence AS confidence, e.line AS call_line",
                 {"n": name},
             )
-            results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"]} for r in rows]
+            results = [{"name": r["name"], "location": f"{r['path']}:{r['line']}", "confidence": r["confidence"], "call_line": r["call_line"]} for r in rows]
             if compact:
-                return [f"{r['name']}\t{r['location']}\t{r['confidence']}" for r in results]
+                return [f"{r['name']}\t{r['location']}\t{r['confidence']}\t@{r['call_line']}" for r in results]
             return results
         rows = self._q(
             f"MATCH (a:Symbol {{name:$n}})-[:CALLS*1..{d}]->(b:Symbol) "
@@ -192,19 +211,25 @@ class GraphQueries:
 
     # ---- new tools ----
 
-    def symbols_in_file(self, path: str, compact: bool = False) -> list:
-        rows = self._q(
+    def symbols_in_file(self, path: str, compact: bool = False, visibility: str | None = None) -> list:
+        cypher = (
             "MATCH (s:Symbol {path: $p}) "
-            "RETURN s.id AS id, s.name AS name, s.kind AS kind, "
+            + ("WHERE s.visibility = $vis " if visibility else "")
+            + "RETURN s.id AS id, s.name AS name, s.kind AS kind, "
             "s.line_start AS line_start, s.line_end AS line_end, "
-            "s.signature AS signature, s.doc AS doc "
-            "ORDER BY s.line_start",
-            {"p": path},
+            "s.signature AS signature, s.doc AS doc, "
+            "s.visibility AS visibility, s.modifiers AS modifiers "
+            "ORDER BY s.line_start"
         )
+        params = {"p": path}
+        if visibility:
+            params["vis"] = visibility
+        rows = self._q(cypher, params)
         results = [
             {"id": r["id"], "name": r["name"], "kind": r["kind"],
              "location": f"{path}:{r['line_start']}-{r['line_end']}",
-             "signature": r["signature"], "doc": r["doc"]}
+             "signature": r["signature"], "doc": r["doc"],
+             "visibility": r["visibility"], "modifiers": r["modifiers"]}
             for r in rows
         ]
         if compact:
@@ -273,6 +298,51 @@ class GraphQueries:
             {"prefix": prefix},
         )
         return [r["path"] for r in rows]
+
+    def repo_map(self, dir_prefix: str | None = None, budget_tokens: int = 2000) -> list[str]:
+        """Most structurally-important symbols (by PageRank), trimmed to a token
+        budget. A whole-repo orientation view far cheaper than reading files.
+        Returns compact `rank kind location signature` rows."""
+        prefix = dir_prefix or ""
+        rows = self._q(
+            "MATCH (s:Symbol) "
+            "WHERE ($prefix = '' OR s.path STARTS WITH $prefix) "
+            "AND s.kind IN ['class', 'interface', 'trait', 'struct', 'enum', 'function', 'method'] "
+            "RETURN s.name AS name, s.kind AS kind, s.path AS path, "
+            "s.line_start AS line, s.signature AS signature, s.rank AS rank "
+            "ORDER BY s.rank DESC LIMIT 500",
+            {"prefix": prefix},
+        )
+        out: list[str] = []
+        used = 0
+        for r in rows:
+            sig = (r["signature"] or "")[:160]
+            line = f"{r['rank']:.4f}\t{r['kind']}\t{r['path']}:{r['line']}\t{sig}"
+            used += len(line) // 4  # ~4 chars/token
+            if used > budget_tokens:
+                break
+            out.append(line)
+        return out
+
+    def search_semantic(self, query: str, limit: int = 15, compact: bool = False) -> list:
+        """Rank symbols by embedding cosine similarity to `query`. Finds code by
+        intent even when names don't match. Falls back to [] if no embeddings."""
+        if self._emb_matrix is None or not self._emb_ids:
+            return []
+        from .indexer.embed import encode_query, top_k
+
+        qvec = encode_query(query)
+        hits = top_k(qvec, self._emb_ids, self._emb_matrix, limit)
+        results = []
+        for sym_id, score in hits:
+            sym = self.get_symbol(sym_id)
+            if sym is None:
+                continue
+            sym["score"] = round(score, 4)
+            results.append(sym)
+        if compact:
+            return [f"{r['name']}\t{r['kind']}\t{r['location']}\t{r['score']}" for r in results]
+        return results
 
     def module_overview(self, dir_prefix: str | None = None) -> list[dict]:
         prefix = dir_prefix or ""
@@ -437,40 +507,115 @@ def run_server(db_path: str, root: str) -> None:
     mcp = FastMCP("graphskill")
     os.chdir(_cwd)
 
+    _register_tools(mcp, gq)
+    mcp.run()
+
+
+def estimate_tool_overhead() -> dict:
+    """Per-turn input cost of the MCP tool surface (names + descriptions + param
+    schemas). These bytes are sent on every turn, so they offset the per-query
+    output savings. ~4 chars/token heuristic (no tiktoken dependency)."""
+    import json
+    import os
+
+    from mcp.server.fastmcp import FastMCP
+
+    _cwd = os.getcwd()
+    os.chdir(os.path.expanduser("~"))
+    mcp = FastMCP("graphskill")
+    os.chdir(_cwd)
+    _register_tools(mcp, None)  # tools aren't called, so gq may be None
+
+    tools = mcp._tool_manager.list_tools()
+    per_tool: list[tuple[str, int]] = []
+    total_chars = 0
+    for t in tools:
+        schema = getattr(t, "parameters", None) or getattr(t, "inputSchema", {}) or {}
+        chars = len(t.name) + len(getattr(t, "description", "") or "") + len(json.dumps(schema))
+        total_chars += chars
+        per_tool.append((t.name, chars))
+    per_tool.sort(key=lambda x: -x[1])
+    return {
+        "tool_count": len(tools),
+        "chars": total_chars,
+        "tokens": total_chars // 4,
+        "per_tool": per_tool,
+    }
+
+
+def _register_tools(mcp, gq) -> None:
+    # Tool docstrings are kept to one line on purpose: they are sent as input
+    # every turn, so the full usage guidance lives in SKILL.md, not here.
+
     @mcp.tool()
-    def search_symbols(query: str, kind: str | None = None, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
-        """Find symbols by name substring. Returns id, kind, location, signature. Use before grep. compact=True → tab-separated strings (fewer tokens). offset for pagination."""
-        return gq.search_symbols(query, kind, limit, offset, compact)
+    def repo_map(dir_prefix: str | None = None, budget_tokens: int = 2000) -> list[str]:
+        """Top symbols by PageRank, trimmed to a token budget. Orientation — read first."""
+        return gq.repo_map(dir_prefix, budget_tokens)
+
+    @mcp.tool()
+    def search_semantic(query: str, limit: int = 15, compact: bool = False) -> list:
+        """Find symbols by meaning (embedding similarity), not substring. Use for intent queries."""
+        return gq.search_semantic(query, limit, compact)
+
+    @mcp.tool()
+    def search_symbols(query: str, kind: str | None = None, limit: int = 20, offset: int = 0, compact: bool = False, visibility: str | None = None) -> list:
+        """Find symbols by name substring. compact→tab strings; offset paginates; visibility filters public/private."""
+        return gq.search_symbols(query, kind, limit, offset, compact, visibility)
 
     @mcp.tool()
     def get_symbol(ref: str) -> dict | None:
-        """Get a symbol's signature, docstring, kind and location by id or name."""
+        """Signature, docstring, kind, location for one symbol by id or name."""
         return gq.get_symbol(ref)
 
     @mcp.tool()
     def read_symbol_body(ref: str) -> dict | None:
-        """Return the exact source of one symbol (function/class) by id or name — not the whole file."""
+        """Exact source of one symbol by id or name — not the whole file."""
         return gq.read_symbol_body(ref)
 
     @mcp.tool()
+    def batch_read_symbol_bodies(refs: list[str]) -> list[dict]:
+        """Read multiple symbol bodies in one call."""
+        return gq.batch_read_symbol_bodies(refs)
+
+    @mcp.tool()
+    def symbols_in_file(path: str, compact: bool = False, visibility: str | None = None) -> list:
+        """All symbols in a file (sig, line, visibility, modifiers). Use instead of reading the file."""
+        return gq.symbols_in_file(path, compact, visibility)
+
+    @mcp.tool()
     def callers(name: str, depth: int = 1, compact: bool = False) -> list:
-        """Symbols that call `name` (transitively up to depth). compact=True → tab-separated rows. depth=1 includes confidence."""
+        """Symbols that call `name`. depth=1 includes confidence + call_line."""
         return gq.callers(name, depth, compact)
 
     @mcp.tool()
     def callees(name: str, depth: int = 1, compact: bool = False) -> list:
-        """Symbols called by `name` (transitively up to depth). compact=True → tab-separated rows. depth=1 includes confidence."""
+        """Symbols called by `name`. depth=1 includes confidence + call_line."""
         return gq.callees(name, depth, compact)
 
     @mcp.tool()
     def uses(name: str, compact: bool = False) -> list:
-        """Classes/interfaces/traits that `name` (a class) depends on — via type-hints, `new`, or static access. Includes confidence."""
+        """Types `name` depends on (type-hints/new/static). Includes confidence."""
         return gq.uses(name, compact)
 
     @mcp.tool()
     def used_by(name: str, compact: bool = False) -> list:
-        """Classes that depend on `name` (reverse of `uses`). Includes confidence."""
+        """Types that depend on `name` (reverse of uses). Includes confidence."""
         return gq.used_by(name, compact)
+
+    @mcp.tool()
+    def inheritors(name: str, depth: int = 1, compact: bool = False) -> list:
+        """Classes/interfaces that inherit from or implement `name`."""
+        return gq.inheritors(name, depth, compact)
+
+    @mcp.tool()
+    def inherited_from(name: str, depth: int = 1, compact: bool = False) -> list:
+        """Base classes/interfaces that `name` extends or implements."""
+        return gq.inherited_from(name, depth, compact)
+
+    @mcp.tool()
+    def search_docs(query: str, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
+        """Search docstrings/comments by substring. compact→tab strings; offset paginates."""
+        return gq.search_docs(query, limit, offset, compact)
 
     @mcp.tool()
     def imports(path: str) -> list[str]:
@@ -484,62 +629,35 @@ def run_server(db_path: str, root: str) -> None:
 
     @mcp.tool()
     def path(src_name: str, dst_name: str) -> list[str] | None:
-        """Shortest call chain from one symbol to another (list of names), or null."""
+        """Shortest call chain between two symbols (names), or null."""
         return gq.path(src_name, dst_name)
 
     @mcp.tool()
-    def overview() -> dict:
-        """Per-file symbol counts plus graph totals — for orientation."""
-        return gq.overview()
-
-    @mcp.tool()
-    def symbols_in_file(path: str, compact: bool = False) -> list:
-        """All symbols defined in a file (name, kind, signature, line). Use instead of reading the whole file. compact=True → tab-separated strings."""
-        return gq.symbols_in_file(path, compact)
-
-    @mcp.tool()
-    def batch_read_symbol_bodies(refs: list[str]) -> list[dict]:
-        """Read multiple symbol bodies in one call. Each ref is an id or name. Saves round-trips vs repeated read_symbol_body."""
-        return gq.batch_read_symbol_bodies(refs)
-
-    @mcp.tool()
-    def inheritors(name: str, depth: int = 1, compact: bool = False) -> list:
-        """Classes/interfaces that inherit from or implement `name` (transitively up to depth). compact=True → tab-separated strings."""
-        return gq.inheritors(name, depth, compact)
-
-    @mcp.tool()
-    def inherited_from(name: str, depth: int = 1, compact: bool = False) -> list:
-        """Base classes/interfaces that `name` extends or implements (transitively up to depth). compact=True → tab-separated strings."""
-        return gq.inherited_from(name, depth, compact)
-
-    @mcp.tool()
-    def search_docs(query: str, limit: int = 20, offset: int = 0, compact: bool = False) -> list:
-        """Search symbol docstrings and preceding comments by substring. Finds symbols described in comments, not just by name. compact=True → tab-separated strings. offset for pagination."""
-        return gq.search_docs(query, limit, offset, compact)
-
-    @mcp.tool()
-    def list_files(dir_prefix: str | None = None) -> list[str]:
-        """List all indexed file paths, optionally filtered by directory prefix. Lighter than overview()."""
-        return gq.list_files(dir_prefix)
-
-    @mcp.tool()
     def subgraph(names: list[str], depth: int = 1) -> dict:
-        """Callers + callees + uses + used_by for a set of symbols in one call. Replaces multiple sequential queries."""
+        """callers+callees+uses+used_by for a set of symbols in one call."""
         return gq.subgraph(names, depth)
 
     @mcp.tool()
+    def list_files(dir_prefix: str | None = None) -> list[str]:
+        """List indexed file paths, optional dir prefix filter."""
+        return gq.list_files(dir_prefix)
+
+    @mcp.tool()
     def module_overview(dir_prefix: str | None = None) -> list[dict]:
-        """Symbol counts grouped by top-level directory (module). Much lighter than overview() on large repos."""
+        """Symbol counts grouped by top-level directory."""
         return gq.module_overview(dir_prefix)
 
     @mcp.tool()
     def hot_symbols(n: int = 10, edge: str = "CALLS") -> list[dict]:
-        """Most-referenced symbols by incoming edge count — god nodes / entry points. edge: CALLS, USES, or INHERITS."""
+        """Most-referenced symbols by incoming edge count. edge: CALLS/USES/INHERITS."""
         return gq.hot_symbols(n, edge)
 
     @mcp.tool()
     def architecture_violations(from_prefix: str, not_to_prefix: str, edge: str = "IMPORTS") -> list[dict]:
-        """Find all edges from files/symbols under from_prefix to those under not_to_prefix. Detects cross-layer dependencies. edge: IMPORTS, CALLS, USES, or INHERITS."""
+        """Edges from from_prefix into not_to_prefix. edge: IMPORTS/CALLS/USES/INHERITS."""
         return gq.architecture_violations(from_prefix, not_to_prefix, edge)
 
-    mcp.run()
+    @mcp.tool()
+    def overview() -> dict:
+        """Per-file symbol counts plus graph totals."""
+        return gq.overview()

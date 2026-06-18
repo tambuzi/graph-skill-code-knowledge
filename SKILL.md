@@ -21,6 +21,8 @@ far cheaper than grep + reading whole files.
 
 | ❌ Do NOT | ✅ Use instead |
 |-----------|---------------|
+| Read many files to orient on a new repo | `repo_map()` |
+| `grep` for a concept when you don't know the name | `search_semantic("what it does")` |
 | `grep -r "ClassName"` to find a symbol | `search_symbols("ClassName")` |
 | Read a whole file to see what's in it | `symbols_in_file(path)` |
 | `grep` for a comment or docstring | `search_docs(query)` |
@@ -35,6 +37,8 @@ far cheaper than grep + reading whole files.
 
 ```
 Need to understand code?
+├── New/unfamiliar repo? → repo_map() FIRST (ranked overview, ~2k tokens)
+├── Know what code does but not its name? → search_semantic("intent phrase")
 ├── Know the name? → search_symbols(name)
 ├── Know the file, want its structure? → symbols_in_file(path)
 ├── Want one function's body? → read_symbol_body(ref)
@@ -60,7 +64,9 @@ Need to understand code?
 ### Discovery
 | Tool | Returns |
 |------|---------|
-| `search_symbols(query, kind?, limit?, offset?, compact?)` | Symbols by name substring → id, kind, location, signature |
+| `repo_map(dir_prefix?, budget_tokens?)` | Top symbols by PageRank, trimmed to a token budget. **Read first on an unfamiliar repo.** |
+| `search_semantic(query, limit?, compact?)` | Symbols ranked by meaning (embedding similarity). Use for intent queries where the name is unknown. |
+| `search_symbols(query, kind?, limit?, offset?, compact?, visibility?)` | Symbols by name substring → id, kind, location, signature, visibility, modifiers |
 | `search_docs(query, limit?, offset?, compact?)` | Symbols by docstring/comment substring |
 | `get_symbol(ref)` | Signature, doc, kind, location for one symbol |
 | `list_files(dir_prefix?)` | All indexed file paths, optional prefix filter |
