@@ -22,7 +22,14 @@ from .indexer.rank import pagerank
 from .indexer.resolve import resolve_calls, resolve_imports, resolve_inherits, resolve_uses
 from .manifest import file_hash, iter_source_files, load_manifest, save_manifest, SKIP_DIRS
 from .registry import project_db_path, update_registry
-from .store import GraphStore
+from .store import GraphStore, SCHEMA_VERSION
+
+
+def _read_schema_version(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
 
 
 # Bump when extraction logic changes, so stale cached extracts are invalidated.
@@ -76,18 +83,27 @@ def build_index(
     # isolated under one directory.
     manifest_path = db_path.parent / "manifest.json"
     cache_dir = db_path.parent / "cache"
+    schema_version_path = db_path.parent / "schema_version"
 
     files = list(iter_source_files(root))
     cur_hashes = {rel: file_hash(abs_path) for abs_path, rel in files}
     old_manifest = load_manifest(manifest_path)
 
-    if incremental and db_path.exists() and cur_hashes == old_manifest:
+    # A schema change must force a rebuild even when no source file changed —
+    # otherwise the no-change short-circuit below would keep serving an old-layout
+    # DB that lacks columns the current code queries.
+    schema_ok = _read_schema_version(schema_version_path) == SCHEMA_VERSION
+
+    if incremental and db_path.exists() and schema_ok and cur_hashes == old_manifest:
         log("Graph up to date — nothing changed.")
         store = GraphStore(db_path)
         stats = store.stats()
         store.close()
         update_registry(root, db=str(db_path), stats=stats, last_indexed=time.strftime('%Y-%m-%dT%H:%M:%S'))
         return stats
+
+    if not schema_ok and db_path.exists():
+        log("Schema changed — full rebuild.")
 
     changed = {rel for rel, h in cur_hashes.items() if old_manifest.get(rel) != h}
     log(f"Indexing {len(files)} files ({len(changed)} new/changed)...")
@@ -159,6 +175,7 @@ def build_index(
         log(f"(embeddings skipped: {exc})")
 
     save_manifest(manifest_path, cur_hashes)
+    schema_version_path.write_text(str(SCHEMA_VERSION))
     update_registry(root, db=str(db_path), stats=stats, last_indexed=time.strftime('%Y-%m-%dT%H:%M:%S'))
     log("Done. " + ", ".join(f"{k}={v}" for k, v in stats.items()))
     return stats

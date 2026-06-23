@@ -12,6 +12,11 @@ import kuzu
 
 from .indexer.extract import Symbol
 
+# Bump whenever _SCHEMA below changes (new node/edge property, table, etc.) so a
+# DB built with an older layout is force-rebuilt instead of being queried with
+# columns the new code expects but the old DB lacks.
+SCHEMA_VERSION = 2
+
 _SCHEMA = [
     "CREATE NODE TABLE IF NOT EXISTS File(path STRING, lang STRING, hash STRING, PRIMARY KEY(path))",
     """CREATE NODE TABLE IF NOT EXISTS Symbol(

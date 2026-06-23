@@ -446,6 +446,11 @@ class _SourceChangeHandler:
         self._debounce = debounce
         self._timer: threading.Timer | None = None
         self._timer_lock = threading.Lock()
+        # Branch switches rewrite .git/HEAD. Watching it re-indexes against the
+        # checked-out branch's code (the working-tree file events from a checkout
+        # also fire, and the debounce coalesces them into one re-index).
+        self._head_path = str((root / ".git" / "HEAD").resolve())
+        self._reason = "source changed"
 
     def _relevant(self, path: str) -> bool:
         p = Path(path)
@@ -458,14 +463,20 @@ class _SourceChangeHandler:
         # Skip any path whose parent components are excluded dirs or hidden dirs.
         return not any(part in SKIP_DIRS or part.startswith(".") for part in parts[:-1])
 
+    def _is_head(self, path: str) -> bool:
+        return bool(path) and Path(path).name == "HEAD" and str(Path(path)) == self._head_path
+
     def dispatch(self, event) -> None:
         if event.is_directory:
             return
         src = getattr(event, "src_path", "")
         dest = getattr(event, "dest_path", "")
-        if not (self._relevant(src) or (dest and self._relevant(dest))):
+        head = self._is_head(src) or self._is_head(dest)
+        if not (head or self._relevant(src) or (dest and self._relevant(dest))):
             return
         with self._timer_lock:
+            if head:
+                self._reason = "branch switched"
             if self._timer is not None:
                 self._timer.cancel()
             self._timer = threading.Timer(self._debounce, self._reindex)
@@ -474,8 +485,11 @@ class _SourceChangeHandler:
 
     def _reindex(self) -> None:
         from .index import build_index
+        with self._timer_lock:
+            reason = self._reason
+            self._reason = "source changed"
         try:
-            print("[graphskill] source changed — re-indexing...", file=sys.stderr, flush=True)
+            print(f"[graphskill] {reason} — re-indexing...", file=sys.stderr, flush=True)
             build_index(self._root, db_path=self._db_path, incremental=True)
             self._gq.reload_store()
             print("[graphskill] re-index complete.", file=sys.stderr, flush=True)

@@ -387,7 +387,13 @@ code ──► tree-sitter ──► symbols + edges ──► KuzuDB ──► 
   logic lives in a plain, unit-testable `GraphQueries` class.
 - **Live re-index** — a `watchdog` observer runs in a daemon thread inside the
   server process. Source file changes trigger an incremental `build_index()` +
-  store swap (under a lock) within ~1.5 s, with no server restart required.
+  store swap (under a lock) within ~1.5 s, with no server restart required. It
+  also watches `.git/HEAD`, so **switching branches re-indexes** against the
+  checked-out branch's code (the checkout's file changes coalesce into one
+  rebuild via the debounce).
+- **Schema versioning** — the DB records a `SCHEMA_VERSION`; if the code's schema
+  has moved on, the next `index` forces a full rebuild instead of serving a
+  stale-layout graph (even when no source file changed).
 
 ---
 

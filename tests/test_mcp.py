@@ -1,7 +1,10 @@
+import types
+from pathlib import Path
+
 import pytest
 
 from graphskill.index import build_index, default_db_path
-from graphskill.mcp_server import GraphQueries
+from graphskill.mcp_server import GraphQueries, _SourceChangeHandler
 
 
 @pytest.fixture
@@ -272,3 +275,37 @@ def test_search_symbols_visibility_filter(gq):
 def test_symbols_in_file_includes_visibility(gq):
     syms = gq.symbols_in_file("auth.py")
     assert all("visibility" in s and "modifiers" in s for s in syms)
+
+
+# ---- branch-switch detection ----
+
+def _make_handler(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    h = _SourceChangeHandler(tmp_path, tmp_path / "graph.kuzu", gq=None, debounce=0.01)
+    return h
+
+
+def _event(src, *, directory=False, dest=""):
+    return types.SimpleNamespace(is_directory=directory, src_path=str(src), dest_path=str(dest))
+
+
+def test_is_head_matches_only_git_head(tmp_path):
+    h = _make_handler(tmp_path)
+    assert h._is_head(str(tmp_path / ".git" / "HEAD"))
+    assert not h._is_head(str(tmp_path / "src" / "HEAD"))  # different dir
+    assert not h._is_head(str(tmp_path / ".git" / "config"))
+
+
+def test_head_change_schedules_reindex_with_branch_reason(tmp_path):
+    h = _make_handler(tmp_path)
+    h.dispatch(_event(tmp_path / ".git" / "HEAD"))
+    assert h._timer is not None
+    h._timer.cancel()  # don't actually run build_index
+    assert h._reason == "branch switched"
+
+
+def test_unrelated_dotgit_file_ignored(tmp_path):
+    h = _make_handler(tmp_path)
+    h.dispatch(_event(tmp_path / ".git" / "index"))
+    assert h._timer is None

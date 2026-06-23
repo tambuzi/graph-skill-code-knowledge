@@ -111,8 +111,9 @@ Need to understand code?
 
 ## Keeping the graph fresh
 
-The server auto-re-indexes on source file changes (1.5 s debounce). If graph
-seems stale after a branch switch or large rewrite:
+The server auto-re-indexes on source file changes (1.5 s debounce) **and on
+branch switches** (it watches `.git/HEAD`, so checking out another branch
+rebuilds the graph against that branch's code). If the graph still seems stale:
 
 ```
 graphskill index .

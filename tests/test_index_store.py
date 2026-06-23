@@ -76,6 +76,23 @@ def test_symbols_have_rank_and_visibility(sample_repo):
     assert by["connect"]["vis"] == "public"
 
 
+def test_schema_bump_forces_rebuild(sample_repo, monkeypatch):
+    build_index(sample_repo)
+    db = default_db_path(sample_repo)
+    sv = db.parent / "schema_version"
+    assert sv.exists()
+
+    # Simulate an older-schema DB: stale version marker, source files unchanged.
+    sv.write_text("0")
+    logs: list[str] = []
+    build_index(sample_repo, log=logs.append)
+    # Must NOT short-circuit — it must rebuild and refresh the version marker.
+    assert not any("up to date" in m for m in logs)
+    assert any("Schema changed" in m for m in logs)
+    from graphskill.store import SCHEMA_VERSION
+    assert sv.read_text().strip() == str(SCHEMA_VERSION)
+
+
 def test_incremental_noop_and_change(sample_repo):
     build_index(sample_repo)
     db = default_db_path(sample_repo)
